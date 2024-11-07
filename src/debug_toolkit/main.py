@@ -80,7 +80,6 @@ def do_injection(pid, python_code, verbose):
         textwrap.dedent(
             f"""\
             set trace-commands on
-            set logging on
             set scheduler-locking off
             call ((int (*)())PyGILState_Ensure)()
             call ((int (*)(const char *))PyRun_SimpleString)("{python_code}")
@@ -98,21 +97,27 @@ def do_injection(pid, python_code, verbose):
     # we don't properly catch errors like trying to debug a non existent process
     # we just wait for them later... fix this by both creating a _start file and by checking stderr / error code
     output = subprocess.check_output(
-        cmd, shell=True, stdin=subprocess.PIPE, stderr=subprocess.STDOUT
+        cmd, shell=True, stdin=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
     
     if verbose:
         typer.echo(output.decode())
 
 
-def do_trampoline_injection(pid, payload, verbose, timeout=120):
+def do_trampoline_injection(
+    pid,
+    payload,
+    verbose,
+    timeout=120,
+    output_path: Optional[str] = None,
+):
     output_filename = f"{secrets.token_hex(16)}_output.txt"
     done_filename = f"{secrets.token_hex(16)}_done.txt"
     abs_done_path = f"/proc/{pid}/cwd/{done_filename}"
-    abs_output_path = f"/proc/{pid}/cwd/{output_filename}"
+    abs_output_path = output_path or f"/proc/{pid}/cwd/{output_filename}"
 
     trampoline = pkgutil.get_data(__package__, "trampolines/simple.py").decode()
-    trampoline = trampoline.replace("OUTPUT_PATH_PLACEHOLDER", f"./{output_filename}")
+    trampoline = trampoline.replace("OUTPUT_PATH_PLACEHOLDER", abs_output_path)
     trampoline = trampoline.replace("DONE_PATH_PLACEHOLDER", f"./{done_filename}")
     payload = f"{payload}\n\n{trampoline}"
 
@@ -139,15 +144,13 @@ def do_trampoline_injection(pid, payload, verbose, timeout=120):
         if status != "SUCCESS" or verbose:
             typer.secho(f"done status is {status}")
 
-    if os.path.exists(abs_output_path):
-        with open(abs_output_path, "rb") as f:
-            result = f.read()
-        typer.echo(result.decode())
-    else:
-        result = None
-
-    if os.path.exists(abs_output_path):
-        os.remove(abs_output_path)
+    result = None
+    if output_path is None:
+        if os.path.exists(abs_output_path):
+            with open(abs_output_path, "rb") as f:
+                result = f.read()
+            typer.echo(result.decode())
+            os.remove(abs_output_path)
     if os.path.exists(abs_done_path):
         os.remove(abs_done_path)
     return result
@@ -160,11 +163,12 @@ def inject_string(
     trampoline: bool = False,
     trampoline_timeout: int = 120,
     verbose: bool = False,
+    output_path: Optional[str] = None,
 ):
     if not trampoline:
         return do_injection(pid, payload, verbose)
     else:
-        return do_trampoline_injection(pid, payload, verbose, trampoline_timeout)
+        return do_trampoline_injection(pid, payload, verbose, trampoline_timeout, output_path=output_path)
 
 
 @app.command()
@@ -191,6 +195,14 @@ def memory(pid: int, seconds: int = 60, verbose: bool = False):
     payload = payload.replace("SECONDS_PLACEHOLDER", str(seconds))
     timeout_seconds = int(seconds * 1.1 + 10)
     inject_string(pid, payload, trampoline=True, trampoline_timeout=timeout_seconds, verbose=verbose)
+
+
+@app.command()
+def dump_heap(pid: int, seconds: int = 60, verbose: bool = False, output_path: Optional[str] = None):
+    payload = pkgutil.get_data(__package__, "payloads/dump_heap.py").decode()
+    payload = payload.replace("SECONDS_PLACEHOLDER", str(seconds))
+    timeout_seconds = int(seconds * 1.1 + 10)
+    inject_string(pid, payload, trampoline=True, trampoline_timeout=timeout_seconds, verbose=verbose, output_path=output_path)
 
 
 @app.command()
